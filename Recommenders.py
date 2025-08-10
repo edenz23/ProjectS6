@@ -4,8 +4,7 @@ from sklearn.metrics.pairwise import cosine_similarity
 from sklearn.ensemble import RandomForestClassifier
 import LoanProfileBuilder
 import OneHotEncodeLoanProfile
-import time
-
+#from loadbar import LoadBar
 
 class LoanRecommender:
     def __init__(self, data_path):
@@ -86,6 +85,14 @@ class LoanRecommender:
 
         self.lenders['AssignedCluster'] = assignments
 
+    def show_training_progress(self, current, total):
+        bar_size = 20
+        step_size = total // bar_size
+        current_progress = current // step_size
+        bat = ''
+        print(f"\r")
+
+
     # ------------------ ML Classifier Training ------------------ #
     def train_classifier(self, max_loans_per_lender=50):
         print("in trainer")
@@ -105,7 +112,8 @@ class LoanRecommender:
         loan_numeric = self.loans[common_cols]
 
         for i, lender_row in self.lenders.iterrows():
-            print(f"lender {i} out of {len(self.lenders)}")
+            if i % (len(self.lenders) // 20) == 0:  # here to show progress of training
+                print(f"lender {i} out of {len(self.lenders)}")
             lender_cluster = lender_row["AssignedCluster"]
             cluster_pref = self.clusters[self.clusters['cluster'] == lender_cluster] \
                 .drop(columns=[self.clusters.columns[-1], 'cluster'], errors='ignore') \
