@@ -12,10 +12,6 @@ first name using the 'gender-guesser' library. This provides an additional match
 signal for the recommendation system.
 """
 
-data_path = "data/"  # path you want everything to read/write from/to
-bigml_path = data_path + "bigml.csv"  # path of raw 'bigml.csv' file in current env
-df = pd.read_csv(bigml_path)
-
 
 def loan_amount_bin(amount):
     if amount <= 500: return "1-500"
@@ -54,9 +50,8 @@ continent_map = {
 # since 'bigml' raw data lacks gender attribute,
 # we will try to infer the gender using open-source gender classification by name.
 
-detector = gender.Detector(case_sensitive=False)
-
 def infer_gender(name):
+    detector = gender.Detector(case_sensitive=False)
     if pd.isna(name) or not isinstance(name, str):
         return "equal"  # unknown
     first_name = name.strip().split()[0]  # take first word
@@ -69,14 +64,18 @@ def infer_gender(name):
         return "equal"  # unknown
 
 
-loan_profile = pd.DataFrame({
-    "Loan_ID": df["id"],
-    "Gender_Loan_Preference": df["Name"].apply(infer_gender),
-    "Average_Age_Range": "unknown",     # placeholder, no age field in raw data
-    "Average_Loan_Amount_Range": df["Loan Amount"].apply(loan_amount_bin),
-    "Loan_Sector": df["Sector"],
-    "Borrower_Continent": df["Country"].map(continent_map).fillna("Other")
-})
+def build_LoanProfile_file(data_path):
+    bigml_path = data_path + "bigml.csv"  # path of raw 'bigml.csv' file in current env
+    df = pd.read_csv(bigml_path)
 
-loan_profile.to_csv(data_path + "LoanProfile.csv", index=False)
-print("LoanProfile.csv created with", len(loan_profile), "rows.")
+    loan_profile = pd.DataFrame({
+        "Loan_ID": df["id"],
+        "Gender_Loan_Preference": df["Name"].apply(infer_gender),
+        "Average_Age_Range": "unknown",     # placeholder, no age field in raw data
+        "Average_Loan_Amount_Range": df["Loan Amount"].apply(loan_amount_bin),
+        "Loan_Sector": df["Sector"],
+        "Borrower_Continent": df["Country"].map(continent_map).fillna("Other")
+    })
+
+    loan_profile.to_csv(data_path + "LoanProfile.csv", index=False)
+    print("LoanProfile.csv created with", len(loan_profile), "rows.")
