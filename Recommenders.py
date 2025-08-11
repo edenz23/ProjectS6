@@ -4,7 +4,7 @@ from sklearn.metrics.pairwise import cosine_similarity
 from sklearn.ensemble import RandomForestClassifier
 import LoanProfileBuilder
 import OneHotEncodeLoanProfile
-#from loadbar import LoadBar
+
 
 class LoanRecommender:
     def __init__(self, data_path):
