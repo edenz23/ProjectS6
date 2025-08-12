@@ -25,7 +25,7 @@ class LoanRecommender:
         self.clusters = pd.read_csv(data_path + "K_Means_Groups_Analysis_With_Lender_Type.csv")
         try:
             self.loans = pd.read_csv(data_path + "LoanProfile_OneHot.csv")
-        except Exception:
+        except FileNotFoundError:
             LoanProfileBuilder.build_LoanProfile_file(data_path)
             OneHotEncodeLoanProfile.build_OneHotLoanProfile_file(data_path, self.lenders)
             self.loans = pd.read_csv(data_path + "LoanProfile_OneHot.csv")
