@@ -5,6 +5,7 @@ from sklearn.ensemble import RandomForestClassifier
 import LoanProfileBuilder
 import OneHotEncodeLoanProfile
 from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import ndcg_score
 
 class LoanRecommender:
     def __init__(self, data_path):
@@ -220,3 +221,39 @@ class LoanRecommender:
         return prefiltered.sort_values("ml_score", ascending=False).head(top_n)
 
 
+    def evaluate_recommender(self, lender_username, recommender_fn, k=10):
+        """
+        Evaluate a given recommender function using cluster preferences as ground truth.
+        recommender_fn: function(lender_username, top_n) -> DataFrame with 'Loan_ID'
+        """
+        lender_row = self.lenders[self.lenders["Lender_Username"] == lender_username]
+        if lender_row.empty:
+            raise ValueError(f"Lender '{lender_username}' not found.")
+
+        lender_cluster = lender_row["AssignedCluster"].iloc[0]
+        common_cols = self.common_cols
+
+        # cluster preference vector
+        cluster_pref = self.clusters[self.clusters['cluster'] == lender_cluster] \
+            .drop(columns=[self.clusters.columns[-1], 'cluster'], errors='ignore') \
+            .select_dtypes(include=['number']).iloc[0] \
+            .reindex(common_cols, fill_value=0)
+
+        cluster_pref_bin = (cluster_pref > 0.5).astype(int).values
+        loan_matrix = self.loans[common_cols].values
+
+        # ground truth relevance: 1 if matches cluster prefs, else 0
+        scores = loan_matrix @ cluster_pref_bin
+        y_true = (scores > 0).astype(int)
+
+        # recommendations
+        recs = recommender_fn(lender_username, top_n=k)
+        recommended_ids = recs["Loan_ID"].values
+        y_pred = self.loans.set_index("Loan_ID").loc[recommended_ids]
+        y_pred_labels = (y_pred[common_cols].values @ cluster_pref_bin > 0).astype(int)
+
+        precision = y_pred_labels.sum() / k
+        recall = y_pred_labels.sum() / max(1, y_true.sum())
+        ndcg = ndcg_score([y_true], [scores])  # over full ranking
+
+        return {"precision@k": precision, "recall@k": recall, "ndcg": ndcg}
