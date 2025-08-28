@@ -4,7 +4,7 @@ from sklearn.metrics.pairwise import cosine_similarity
 from sklearn.ensemble import RandomForestClassifier
 import LoanProfileBuilder
 import OneHotEncodeLoanProfile
-
+from sklearn.linear_model import LogisticRegression
 
 class LoanRecommender:
     def __init__(self, data_path):
@@ -30,8 +30,9 @@ class LoanRecommender:
             OneHotEncodeLoanProfile.build_OneHotLoanProfile_file(data_path, self.lenders)
             self.loans = pd.read_csv(data_path + "LoanProfile_OneHot.csv")
 
-        self.classifier = None
         self.common_cols = None
+        self.rf_clf = None
+        self.lr_clf = None
 
         # Assign clusters at initialization
         self._assign_lenders_to_clusters()
@@ -94,26 +95,31 @@ class LoanRecommender:
 
 
     # ------------------ ML Classifier Training ------------------ #
-    def train_classifier(self, max_loans_per_lender=50):
-        print("in trainer")
+    def train_classifier(self, max_loans_per_lender=50, models=("rf", "lr")):
         """
-        Train a RandomForestClassifier to predict lender-loan matches.
-        Uses sampling to avoid generating billions of pairs.
+        Train ML models to predict lender-loan matches using sampled pairs.
+        models: tuple containing any of ("rf","lr") to control which models to train.
         """
+        # Ensure clusters are assigned
+        if 'AssignedCluster' not in self.lenders.columns:
+            self._assign_lenders_to_clusters()
 
+        # Align common numeric columns once
         common_cols = self.lenders.drop(columns=["Lender_Username", "AssignedCluster"], errors='ignore') \
             .select_dtypes(include=['number']).columns.intersection(
             self.loans.drop(columns=["Loan_ID"], errors='ignore') \
                 .select_dtypes(include=['number']).columns
         )
+        self.common_cols = common_cols
 
         X, y = [], []
-
         loan_numeric = self.loans[common_cols]
 
         for i, lender_row in self.lenders.iterrows():
-            if i % (len(self.lenders) // 20) == 0:  # here to show progress of training
-                print(f"lender {i} out of {len(self.lenders)}")
+            # (Optional tiny progress prints are ok with big loops)
+            if i % max(1, (len(self.lenders) // 20)) == 0:
+                print(f"Sampling training pairs: lender {i} / {len(self.lenders)}")
+
             lender_cluster = lender_row["AssignedCluster"]
             cluster_pref = self.clusters[self.clusters['cluster'] == lender_cluster] \
                 .drop(columns=[self.clusters.columns[-1], 'cluster'], errors='ignore') \
@@ -123,66 +129,94 @@ class LoanRecommender:
             cluster_pref_bin = (cluster_pref > 0.5).astype(int).values
             lender_vec = lender_row[common_cols].values
 
-            # Score all loans once
+            # Score all loans once for this cluster profile
             scores = loan_numeric.values @ cluster_pref_bin
 
             # Positive matches: top-N
             pos_idx = np.argsort(scores)[-max_loans_per_lender:]
-            # Negative matches: random from the rest
+            # Negative matches: random from remaining
             neg_candidates = np.setdiff1d(np.arange(len(scores)), pos_idx)
-            neg_idx = np.random.choice(neg_candidates,
-                                       size=min(max_loans_per_lender, len(neg_candidates)),
-                                       replace=False)
+            if len(neg_candidates) == 0:
+                selected_idx = pos_idx
+                neg_idx = np.array([], dtype=int)
+            else:
+                neg_idx = np.random.choice(
+                    neg_candidates,
+                    size=min(max_loans_per_lender, len(neg_candidates)),
+                    replace=False
+                )
+                selected_idx = np.concatenate([pos_idx, neg_idx])
 
-            selected_idx = np.concatenate([pos_idx, neg_idx])
+            # Build rows
+            lender_repeated = np.tile(lender_vec, (selected_idx.shape[0], 1))
+            loans_block = loan_numeric.iloc[selected_idx].values
+            X_block = np.hstack([lender_repeated, loans_block])
 
-            for idx in selected_idx:
-                loan_vec = loan_numeric.iloc[idx].values
-                is_match = 1 if idx in pos_idx else 0
-                X.append(np.concatenate([lender_vec, loan_vec]))
-                y.append(is_match)
+            # Labels: 1 for positives, 0 for negatives
+            y_block = np.zeros(selected_idx.shape[0], dtype=int)
+            y_block[:len(pos_idx)] = 1  # first |pos_idx| rows correspond to positives
 
-        X = np.array(X)
-        y = np.array(y)
+            X.append(X_block)
+            y.append(y_block)
 
-        clf = RandomForestClassifier(n_estimators=100, random_state=42)
-        clf.fit(X, y)
+        # Stack once
+        X = np.vstack(X)
+        y = np.concatenate(y)
 
-        self.classifier = clf
-        self.common_cols = common_cols
+        # Train requested models
+        if "rf" in models:
+            self.rf_clf = RandomForestClassifier(n_estimators=100, random_state=42, n_jobs=-1)
+            self.rf_clf.fit(X, y)
+        if "lr" in models:
+            # Logistic Regression with saga (handles large/dense/sparse), balanced classes, and more iters
+            self.lr_clf = LogisticRegression(
+                solver="saga",
+                max_iter=1000,
+                n_jobs=-1,
+                class_weight="balanced"
+            )
+            self.lr_clf.fit(X, y)
 
-    def recommend_ml(self, lender_username, top_n=5, prefilter_ratio=0.1):
+        print(
+            f"Trained models: {', '.join([m for m in models if (m == 'rf' and self.rf_clf) or (m == 'lr' and self.lr_clf)])}")
+
+    def recommend_ml(self, lender_username, top_n=5, prefilter_ratio=0.1, model="rf"):
         """
         Hybrid recommendation:
-        1. Prefilter loans using cosine similarity (top prefilter_ratio %).
-        2. Rank prefiltered loans with the ML classifier.
-
-        prefilter_ratio: fraction of loans to keep before ML scoring (0.1 = 10%).
+        1) Cosine prefilter (top prefilter_ratio % by similarity)
+        2) ML scoring using chosen model: "rf" (RandomForest) or "lr" (LogisticRegression)
         """
-        if not hasattr(self, "classifier"):
-            raise ValueError("You must train the classifier first.")
+        if model == "rf" and self.rf_clf is None:
+            raise ValueError("RandomForest not trained. Call train_classifier(models=('rf', ...)) first.")
+        if model == "lr" and self.lr_clf is None:
+            raise ValueError("LogisticRegression not trained. Call train_classifier(models=('lr', ...)) first.")
+        if self.common_cols is None:
+            raise ValueError("Model not initialized with common_cols. Train first.")
 
         lender_row = self.lenders[self.lenders["Lender_Username"] == lender_username]
         if lender_row.empty:
             raise ValueError(f"Lender '{lender_username}' not found.")
 
-        lender_vec = lender_row[self.common_cols].values[0]  # (num_features,)
-        loan_matrix = self.loans[self.common_cols].values  # (num_loans, num_features)
+        lender_vec = lender_row[self.common_cols].values[0]
+        loan_matrix = self.loans[self.common_cols].values
 
-        # Step 1: cosine similarity prefilter
+        # 1) Prefilter by cosine sim
         sims = cosine_similarity(lender_vec.reshape(1, -1), loan_matrix)[0]
         loans_with_sims = self.loans.copy()
         loans_with_sims["similarity"] = sims
-
-        # Keep top X% by similarity
         prefilter_n = max(1, int(len(loans_with_sims) * prefilter_ratio))
-        prefiltered_loans = loans_with_sims.nlargest(prefilter_n, "similarity")
+        prefiltered = loans_with_sims.nlargest(prefilter_n, "similarity")
 
-        # Step 2: ML scoring on prefiltered loans
+        # 2) Vectorized ML scoring on prefiltered set
         lender_repeated = np.tile(lender_vec, (prefilter_n, 1))
-        X_input = np.hstack([lender_repeated, prefiltered_loans[self.common_cols].values])
-        proba = self.classifier.predict_proba(X_input)[:, 1]
+        X_input = np.hstack([lender_repeated, prefiltered[self.common_cols].values])
 
-        prefiltered_loans["ml_score"] = proba
+        if model == "rf":
+            proba = self.rf_clf.predict_proba(X_input)[:, 1]
+        else:
+            proba = self.lr_clf.predict_proba(X_input)[:, 1]
 
-        return prefiltered_loans.sort_values("ml_score", ascending=False).head(top_n)
+        prefiltered["ml_score"] = proba
+        return prefiltered.sort_values("ml_score", ascending=False).head(top_n)
+
+
